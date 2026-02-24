@@ -1,0 +1,13 @@
+{
+  "name": "livigno-expenses",
+  "version": "1.0.0",
+  "description": "Gruppenkasse Livigno Snowboard Trip 2026",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0"
+  }
+}
