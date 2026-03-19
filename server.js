@@ -1,19 +1,21 @@
 const express = require("express");
 const Database = require("better-sqlite3");
 const path = require("path");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 // --- Database Setup ---
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "expenses.db");
-const fs = require("fs");
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
 
+// --- Schema Migration ---
 db.exec(`
   CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,6 +24,10 @@ db.exec(`
     what TEXT NOT NULL,
     amount REAL NOT NULL,
     for_who TEXT NOT NULL DEFAULT 'Alle',
+    category TEXT DEFAULT 'other',
+    merchant TEXT,
+    details TEXT,
+    receipt_data TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
@@ -39,197 +45,206 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER,
+    description TEXT,
+    actor TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// Safe column additions (idempotent)
+const cols = db.prepare("PRAGMA table_info(expenses)").all().map(c => c.name);
+if (!cols.includes("category")) db.exec("ALTER TABLE expenses ADD COLUMN category TEXT DEFAULT 'other'");
+if (!cols.includes("merchant")) db.exec("ALTER TABLE expenses ADD COLUMN merchant TEXT");
+if (!cols.includes("details")) db.exec("ALTER TABLE expenses ADD COLUMN details TEXT");
+if (!cols.includes("receipt_data")) db.exec("ALTER TABLE expenses ADD COLUMN receipt_data TEXT");
+
 // Seed if both tables empty
 const expCount = db.prepare("SELECT COUNT(*) as c FROM expenses").get();
 const txCount = db.prepare("SELECT COUNT(*) as c FROM transfers").get();
 
 if (expCount.c === 0 && txCount.c === 0) {
-  const insExp = db.prepare("INSERT INTO expenses (date, person, what, amount, for_who) VALUES (?, ?, ?, ?, ?)");
+  const insExp = db.prepare("INSERT INTO expenses (date, person, what, amount, for_who, category) VALUES (?, ?, ?, ?, ?, ?)");
   const insTx = db.prepare("INSERT INTO transfers (date, from_person, to_person, amount, note) VALUES (?, ?, ?, ?, ?)");
+  const insLog = db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)");
   
   const tx = db.transaction(() => {
-    // Pre-booked expenses (non-refundable) — split among ALL 4
-    insExp.run("15.02.", "Kai", "Flüge SkyAlps (4x)", 1576.99, "Alle");
-    insExp.run("15.02.", "Kai", "Unterkunft Booking.com", 1240.00, "Alle");
-    insExp.run("vor Reise", "Flo", "Mietwagen Ford Kuga", 158.11, "Alle");
-    
-    // Transfers already done
+    insExp.run("15.02.", "Kai", "Flüge SkyAlps (4x)", 1576.99, "Alle", "transport");
+    insExp.run("15.02.", "Kai", "Unterkunft Booking.com", 1240.00, "Alle", "accommodation");
+    insExp.run("vor Reise", "Flo", "Mietwagen Ford Kuga", 158.11, "Alle", "transport");
     insTx.run("12.02.", "Patrick L.", "Kai", 1018.61, "PayPal Pool");
     insTx.run("12.02.", "Patrick Lu.", "Kai", 1018.61, "PayPal Pool");
     insTx.run("12.02.", "Flo", "Kai", 1018.61, "PayPal Pool");
+    insLog.run("init", "system", null, "Gruppenkasse initialisiert mit Seed-Daten", "system");
   });
   tx();
-  console.log("✓ Preset expenses & transfers seeded");
+  console.log("✓ Seeded expenses, transfers & audit log");
 }
 
 // --- Middleware ---
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // --- Crew ---
 const FULL_CREW = ["Kai", "Patrick L.", "Patrick Lu.", "Flo"];
 const ACTIVE_CREW = ["Kai", "Patrick L.", "Flo"];
 
-// Resolve for_who to list of people
 function resolveForWho(forWho) {
   if (forWho === "Alle") return FULL_CREW;
   if (forWho === "Reise") return ACTIVE_CREW;
-  // Check if it's a single person name
+  // Comma-separated list: "Flo,Patrick L."
+  if (forWho.includes(",")) return forWho.split(",").map(s => s.trim()).filter(s => FULL_CREW.includes(s));
   if (FULL_CREW.includes(forWho)) return [forWho];
-  // Fallback
   return ACTIVE_CREW;
 }
 
 // --- Settlement Logic ---
 function calculateSettlement() {
-  const expenses = db.prepare("SELECT * FROM expenses ORDER BY id ASC").all();
+  const expenses = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at,updated_at FROM expenses ORDER BY id ASC").all();
   const transfers = db.prepare("SELECT * FROM transfers ORDER BY id ASC").all();
-  
   const totalExpenses = expenses.reduce((s, e) => s + e.amount, 0);
   
-  // Calculate per-person share based on for_who
-  const owes = {};
-  FULL_CREW.forEach(p => owes[p] = 0);
-  
+  const owes = {}; FULL_CREW.forEach(p => owes[p] = 0);
   expenses.forEach(e => {
     const group = resolveForWho(e.for_who);
     const share = e.amount / group.length;
-    group.forEach(p => {
-      owes[p] += share;
-    });
+    group.forEach(p => { owes[p] += share; });
   });
   
-  // What each person paid for the group
-  const paid = {};
-  FULL_CREW.forEach(p => paid[p] = 0);
-  expenses.forEach(e => {
-    if (paid[e.person] !== undefined) paid[e.person] += e.amount;
-  });
+  const paid = {}; FULL_CREW.forEach(p => paid[p] = 0);
+  expenses.forEach(e => { if (paid[e.person] !== undefined) paid[e.person] += e.amount; });
   
-  // Raw balance = paid - owed (positive = overpaid)
-  const rawBalances = {};
-  FULL_CREW.forEach(p => rawBalances[p] = paid[p] - owes[p]);
-  
-  // Apply completed transfers
+  const rawBalances = {}; FULL_CREW.forEach(p => rawBalances[p] = paid[p] - owes[p]);
   const netBalances = { ...rawBalances };
   transfers.forEach(t => {
     if (netBalances[t.from_person] !== undefined) netBalances[t.from_person] += t.amount;
     if (netBalances[t.to_person] !== undefined) netBalances[t.to_person] -= t.amount;
   });
   
-  // Calculate remaining transfers needed
-  const debtors = FULL_CREW.filter(p => netBalances[p] < -0.01)
-    .map(p => ({ name: p, amount: -netBalances[p] }))
-    .sort((a, b) => b.amount - a.amount);
-  const creditors = FULL_CREW.filter(p => netBalances[p] > 0.01)
-    .map(p => ({ name: p, amount: netBalances[p] }))
-    .sort((a, b) => b.amount - a.amount);
+  const debtors = FULL_CREW.filter(p => netBalances[p] < -0.01).map(p => ({ name: p, amount: -netBalances[p] })).sort((a,b) => b.amount-a.amount);
+  const creditors = FULL_CREW.filter(p => netBalances[p] > 0.01).map(p => ({ name: p, amount: netBalances[p] })).sort((a,b) => b.amount-a.amount);
   
   const remainingTransfers = [];
-  let di = 0, ci = 0;
-  const d = debtors.map(x => ({ ...x }));
-  const c = creditors.map(x => ({ ...x }));
-  
+  let di=0, ci=0;
+  const d = debtors.map(x => ({...x})), c = creditors.map(x => ({...x}));
   while (di < d.length && ci < c.length) {
     const transfer = Math.min(d[di].amount, c[ci].amount);
-    if (transfer > 0.01) {
-      remainingTransfers.push({ 
-        from: d[di].name, 
-        to: c[ci].name, 
-        amount: Math.round(transfer * 100) / 100 
-      });
-    }
-    d[di].amount -= transfer;
-    c[ci].amount -= transfer;
-    if (d[di].amount < 0.01) di++;
-    if (c[ci].amount < 0.01) ci++;
+    if (transfer > 0.01) remainingTransfers.push({ from: d[di].name, to: c[ci].name, amount: Math.round(transfer*100)/100 });
+    d[di].amount -= transfer; c[ci].amount -= transfer;
+    if (d[di].amount < 0.01) di++; if (c[ci].amount < 0.01) ci++;
   }
   
-  // Total already transferred
-  const totalTransferred = {};
-  FULL_CREW.forEach(p => totalTransferred[p] = 0);
-  transfers.forEach(t => {
-    if (totalTransferred[t.from_person] !== undefined) totalTransferred[t.from_person] += t.amount;
-  });
-  
-  return { 
-    expenses, transfers, totalExpenses, 
-    owes, paid, rawBalances, netBalances, 
-    remainingTransfers, totalTransferred,
-    fullCrew: FULL_CREW,
-    activeCrew: ACTIVE_CREW
-  };
+  return { expenses, transfers, totalExpenses, owes, paid, rawBalances, netBalances, remainingTransfers, fullCrew: FULL_CREW, activeCrew: ACTIVE_CREW };
 }
 
 // --- API Routes ---
-
 app.get("/api/expenses", (req, res) => {
-  const expenses = db.prepare("SELECT * FROM expenses ORDER BY id ASC").all();
+  const expenses = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at,updated_at FROM expenses ORDER BY id ASC").all();
   res.json(expenses);
 });
 
 app.post("/api/expenses", (req, res) => {
-  const { person, what, amount, for_who } = req.body;
-  if (!person || !what || !amount) {
-    return res.status(400).json({ error: "person, what, and amount are required" });
-  }
+  const { person, what, amount, for_who, category, merchant, details, receipt_data } = req.body;
+  if (!person || !what || !amount) return res.status(400).json({ error: "person, what, amount required" });
   const date = new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
   const result = db.prepare(
-    "INSERT INTO expenses (date, person, what, amount, for_who) VALUES (?, ?, ?, ?, ?)"
-  ).run(date, person, what, parseFloat(amount), for_who || "Reise");
-  const expense = db.prepare("SELECT * FROM expenses WHERE id = ?").get(result.lastInsertRowid);
+    "INSERT INTO expenses (date, person, what, amount, for_who, category, merchant, details, receipt_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(date, person, what, parseFloat(amount), for_who || "Reise", category || "other", merchant || null, details || null, receipt_data || null);
+  const expense = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at FROM expenses WHERE id = ?").get(result.lastInsertRowid);
+  
+  db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)")
+    .run("create", "expense", expense.id, `${what} – ${parseFloat(amount).toFixed(2)}€${receipt_data ? " (mit Beleg)" : ""}`, person);
+  
   res.status(201).json(expense);
 });
 
 app.delete("/api/expenses/:id", (req, res) => {
-  const result = db.prepare("DELETE FROM expenses WHERE id = ?").run(req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  const expense = db.prepare("SELECT * FROM expenses WHERE id = ?").get(req.params.id);
+  if (!expense) return res.status(404).json({ error: "Not found" });
+  db.prepare("DELETE FROM expenses WHERE id = ?").run(req.params.id);
+  db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)")
+    .run("delete", "expense", expense.id, `${expense.what} – ${expense.amount.toFixed(2)}€ gelöscht`, "user");
   res.json({ success: true });
 });
 
-app.get("/api/transfers", (req, res) => {
-  const transfers = db.prepare("SELECT * FROM transfers ORDER BY id ASC").all();
-  res.json(transfers);
+app.get("/api/expenses/:id/receipt", (req, res) => {
+  const row = db.prepare("SELECT receipt_data FROM expenses WHERE id = ?").get(req.params.id);
+  if (!row || !row.receipt_data) return res.status(404).json({ error: "No receipt" });
+  res.json({ receipt_data: row.receipt_data });
 });
+
+app.get("/api/transfers", (req, res) => res.json(db.prepare("SELECT * FROM transfers ORDER BY id ASC").all()));
 
 app.post("/api/transfers", (req, res) => {
   const { from_person, to_person, amount, note } = req.body;
-  if (!from_person || !to_person || !amount) {
-    return res.status(400).json({ error: "from_person, to_person, and amount are required" });
-  }
+  if (!from_person || !to_person || !amount) return res.status(400).json({ error: "from_person, to_person, amount required" });
   const date = new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-  const result = db.prepare(
-    "INSERT INTO transfers (date, from_person, to_person, amount, note) VALUES (?, ?, ?, ?, ?)"
-  ).run(date, from_person, to_person, parseFloat(amount), note || "");
+  const result = db.prepare("INSERT INTO transfers (date, from_person, to_person, amount, note) VALUES (?, ?, ?, ?, ?)").run(date, from_person, to_person, parseFloat(amount), note || "");
   const transfer = db.prepare("SELECT * FROM transfers WHERE id = ?").get(result.lastInsertRowid);
+  db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)")
+    .run("create", "transfer", transfer.id, `${from_person} → ${to_person}: ${parseFloat(amount).toFixed(2)}€`, from_person);
   res.status(201).json(transfer);
 });
 
 app.delete("/api/transfers/:id", (req, res) => {
-  const result = db.prepare("DELETE FROM transfers WHERE id = ?").run(req.params.id);
-  if (result.changes === 0) return res.status(404).json({ error: "Not found" });
+  const transfer = db.prepare("SELECT * FROM transfers WHERE id = ?").get(req.params.id);
+  if (!transfer) return res.status(404).json({ error: "Not found" });
+  db.prepare("DELETE FROM transfers WHERE id = ?").run(req.params.id);
+  db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)")
+    .run("delete", "transfer", transfer.id, `${transfer.from_person} → ${transfer.to_person}: ${transfer.amount.toFixed(2)}€ gelöscht`, "user");
   res.json({ success: true });
 });
 
-app.get("/api/summary", (req, res) => {
-  res.json(calculateSettlement());
+app.get("/api/summary", (req, res) => res.json(calculateSettlement()));
+
+app.get("/api/audit-log", (req, res) => {
+  const log = db.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT 100").all();
+  res.json(log);
+});
+
+// --- Receipt AI Analysis ---
+app.post("/api/receipts/analyze", async (req, res) => {
+  if (!ANTHROPIC_KEY) return res.status(503).json({ error: "ANTHROPIC_API_KEY nicht konfiguriert" });
+  const { image_base64, mime_type } = req.body;
+  if (!image_base64) return res.status(400).json({ error: "image_base64 required" });
+  
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514", max_tokens: 1000,
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: mime_type || "image/jpeg", data: image_base64 } },
+          { type: "text", text: `Analysiere diesen Kassenbon/Beleg. Antworte NUR mit JSON (kein Markdown):
+{"title":"Kurzbeschreibung","amount":123.45,"category":"transport|accommodation|food|equipment|activity|drinks|lift|other","date":"TT.MM.","details":"Positionen","merchant":"Geschäftsname"}` }
+        ]}]
+      })
+    });
+    const data = await resp.json();
+    const text = (data.content || []).map(c => c.text || "").join("");
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+    res.json(parsed);
+  } catch (e) {
+    console.error("Receipt analysis error:", e.message);
+    res.status(500).json({ error: "Analyse fehlgeschlagen", detail: e.message });
+  }
 });
 
 // Webhook for n8n
 app.get("/api/webhook/add", (req, res) => {
   const { person, betrag, was, fuer } = req.query;
-  if (!person || !betrag || !was) {
-    return res.status(400).json({ error: "person, betrag, was required" });
-  }
+  if (!person || !betrag || !was) return res.status(400).json({ error: "person, betrag, was required" });
   const date = new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-  db.prepare(
-    "INSERT INTO expenses (date, person, what, amount, for_who) VALUES (?, ?, ?, ?, ?)"
-  ).run(date, person, was, parseFloat(betrag), fuer || "Reise");
+  db.prepare("INSERT INTO expenses (date, person, what, amount, for_who) VALUES (?, ?, ?, ?, ?)").run(date, person, was, parseFloat(betrag), fuer || "Reise");
   res.json({ success: true });
 });
 
-app.get("/api/crew", (req, res) => {
-  res.json({ fullCrew: FULL_CREW, activeCrew: ACTIVE_CREW });
-});
+app.get("/api/crew", (req, res) => res.json({ fullCrew: FULL_CREW, activeCrew: ACTIVE_CREW }));
 
-app.listen(PORT, () => console.log(`🏂 Livigno Expenses running on :${PORT}`));
+app.listen(PORT, () => console.log(`🏂 Livigno Expenses v2 running on :${PORT}`));
