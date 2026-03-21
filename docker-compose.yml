@@ -2,15 +2,20 @@ services:
   app:
     build: .
     ports:
-      - "3000:3000"
+      - "3000"
     volumes:
       - expenses-data:/app/data
     environment:
       - PORT=3000
       - DB_PATH=/app/data/expenses.db
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    networks:
+      - coolify
     restart: unless-stopped
 
 volumes:
   expenses-data:
-    name: livigno-expenses-data
+
+networks:
+  coolify:
+    external: true
