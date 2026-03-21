@@ -38,6 +38,8 @@ h1{font-family:'Playfair Display',Georgia,serif;font-weight:900;font-size:26px;l
 .riders{display:flex;gap:3px;margin-top:6px;flex-wrap:wrap}
 .rider{padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;border:1.5px solid}
 .btn-del{margin-top:6px;font-size:9px;color:rgba(199,80,80,0.6);background:transparent;border:1px solid rgba(199,80,80,0.25);border-radius:6px;padding:2px 8px;cursor:pointer;font-weight:600}
+.card.has-receipt{border-left:3px solid var(--primary)}
+.card.has-receipt:hover{border-left-color:var(--primary-hover)}
 .transfer .arrow{color:var(--accent);font-weight:700;font-size:13px}
 .transfer .amt{color:var(--success)}
 .fab{position:fixed;bottom:24px;right:24px;width:54px;height:54px;border-radius:16px;background:var(--primary);color:#fff;border:none;font-size:26px;font-weight:300;cursor:pointer;box-shadow:0 6px 24px rgba(200,149,108,0.35);display:flex;align-items:center;justify-content:center;transition:all 0.25s;z-index:100}
@@ -114,11 +116,12 @@ function riderBadge(name,small){const c=COLORS[name]||P.text2;return `<span clas
 function expenseCard(e){
   const group=e.for_who==="Alle"?state.crew:e.for_who==="Reise"?state.summary.activeCrew:e.for_who.includes(",")?e.for_who.split(",").map(s=>s.trim()):[e.for_who];
   const pp=e.amount/group.length;const partial=group.length<state.crew.length;
-  const hasReceipt=!!e.receipt_data||!!e.details;
-  return `<div class="card"><div class="card-row"><div style="flex:1;min-width:0">
+  const hasReceipt=!!e.receipt_data;
+  const clickable=hasReceipt?`onclick="viewReceipt(${e.id})" style="cursor:pointer"`:"";
+  return `<div class="card ${hasReceipt?'has-receipt':''}" ${clickable}><div class="card-row"><div style="flex:1;min-width:0">
     <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:5px">
       <span style="font-size:15px">${CATS[e.category]||"📦"}</span><span class="title">${e.what}</span>
-      ${hasReceipt?`<span class="badge badge-receipt" onclick="viewReceipt(${e.id})">📷 Beleg</span>`:""}
+      ${hasReceipt?`<span class="badge badge-receipt">📷 Beleg</span>`:""}
     </div>
     <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
       <span class="meta">${e.person} · ${e.date}</span>
@@ -128,7 +131,7 @@ function expenseCard(e){
     ${e.merchant?`<div class="meta" style="margin-top:6px;padding-top:6px;border-top:1px solid ${P.border}60">🏪 ${e.merchant}${e.details?" — "+e.details:""}</div>`:""}
   </div><div style="text-align:right;min-width:85px;flex-shrink:0">
     <div class="amt">${fmt(e.amount)}</div><div class="per">${fmt(pp)} / Pers.</div>
-    <button class="btn-del" onclick="delExpense(${e.id})">Löschen</button>
+    <button class="btn-del" onclick="event.stopPropagation();delExpense(${e.id})">Löschen</button>
   </div></div></div>`;
 }
 
@@ -157,7 +160,17 @@ function balanceView(){
     s.remainingTransfers.forEach(t=>{html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:13px">${riderBadge(t.from,true)}<span class="arrow" style="color:var(--accent);font-weight:700">→</span>${riderBadge(t.to,true)}<span style="font-weight:700;color:var(--error)">${fmt(t.amount)}</span></div>`;});
     html+=`</div>`;
   }
-  return html+`</div>`;
+  return html+`</div>
+  <div class="card" style="padding:16px 18px;margin-top:10px">
+    <div class="title" style="margin-bottom:4px">📄 Einzelabrechnungen</div>
+    <div class="meta" style="margin-bottom:12px">PDF pro Teilnehmer mit persönlicher Aufschlüsselung</div>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      ${state.crew.map(p=>`<button class="btn btn-secondary" style="width:100%;display:flex;justify-content:space-between;align-items:center" onclick="exportPDF('${p.replace(/'/g,"\\'")}')">
+        ${riderBadge(p,false)}<span style="font-size:12px;color:var(--primary)">PDF ↓</span>
+      </button>`).join("")}
+    </div>
+    <button class="btn btn-primary" style="width:100%;margin-top:10px" onclick="exportAllPDFs()">Alle PDFs generieren</button>
+  </div>`;
 }
 
 function logView(){
@@ -311,6 +324,138 @@ document.getElementById("fab-add").onclick=()=>{
     m.remove();load();
   };
 };
+
+// --- PDF Export ---
+async function exportPDF(person){
+  const resp=await fetch(`/api/export/${encodeURIComponent(person)}`);
+  if(!resp.ok){alert("Export fehlgeschlagen");return;}
+  const d=await resp.json();
+  const w=window.open("","_blank");
+  w.document.write(buildPDFHtml(d));
+  w.document.close();
+  setTimeout(()=>w.print(),500);
+}
+
+async function exportAllPDFs(){
+  for(const p of state.crew){
+    await exportPDF(p);
+    await new Promise(r=>setTimeout(r,800));
+  }
+}
+
+function buildPDFHtml(d){
+  const f=n=>n.toLocaleString("de-DE",{minimumFractionDigits:2,maximumFractionDigits:2})+" €";
+  const pos=d.netBalance>0;
+  const balColor=Math.abs(d.netBalance)<1?"#6B4E3D":pos?"#7BA05B":"#C75050";
+  
+  let expRows=d.myExpenses.map(e=>{
+    const partial=e.splitCount<d.crew.length;
+    return `<tr>
+      <td>${e.date}</td><td>${e.what}${e.merchant?" <small>("+e.merchant+")</small>":""}</td>
+      <td>${e.person}</td>
+      <td style="text-align:right">${f(e.amount)}</td>
+      <td style="text-align:center">${partial?e.group.join(", "):"Alle ("+d.crew.length+")"}</td>
+      <td style="text-align:right;font-weight:600">${f(e.myShare)}</td>
+    </tr>`;
+  }).join("");
+  
+  let paidRows=d.iPaid.map(e=>`<tr><td>${e.date}</td><td>${e.what}</td><td style="text-align:right;font-weight:600">${f(e.amount)}</td></tr>`).join("");
+  
+  let txOutRows=d.myTransfersOut.map(t=>`<tr><td>${t.date}</td><td>→ ${t.to_person}</td><td>${t.note||""}</td><td style="text-align:right">${f(t.amount)}</td></tr>`).join("");
+  let txInRows=d.myTransfersIn.map(t=>`<tr><td>${t.date}</td><td>← ${t.from_person}</td><td>${t.note||""}</td><td style="text-align:right">${f(t.amount)}</td></tr>`).join("");
+  
+  let remainingHtml="";
+  if(d.remaining.length){
+    remainingHtml=`<div class="section"><h3>Offene Ausgleichszahlungen</h3><table><thead><tr><th>Von</th><th>An</th><th style="text-align:right">Betrag</th></tr></thead><tbody>`;
+    d.remaining.forEach(t=>{remainingHtml+=`<tr style="color:${t.from===d.person?"#C75050":"#7BA05B"}"><td>${t.from}</td><td>${t.to}</td><td style="text-align:right;font-weight:700">${f(t.amount)}</td></tr>`;});
+    remainingHtml+=`</tbody></table></div>`;
+  }
+
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Abrechnung ${d.person} – Livigno 2026</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Inter:wght@400;500;600;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;color:#2C1810;padding:40px;max-width:800px;margin:0 auto;background:#fff}
+h1{font-family:'Playfair Display',serif;font-size:28px;margin-bottom:4px}
+h2{font-family:'Playfair Display',serif;font-size:18px;color:#C8956C;margin-bottom:12px}
+h3{font-family:'Playfair Display',serif;font-size:15px;margin-bottom:8px;color:#2C1810}
+.header{text-align:center;margin-bottom:32px;padding-bottom:20px;border-bottom:2px solid #E8D5C4}
+.sub{font-size:12px;color:#6B4E3D;letter-spacing:1.5px;text-transform:uppercase;margin-top:4px}
+.summary-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:28px}
+.sum-box{background:#FFF8F0;border:1px solid #E8D5C4;border-radius:12px;padding:16px;text-align:center}
+.sum-box .label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6B4E3D;margin-bottom:4px}
+.sum-box .val{font-family:'Playfair Display',serif;font-weight:700;font-size:22px}
+.section{margin-bottom:24px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px}
+th{background:#FFF8F0;color:#6B4E3D;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;padding:8px 10px;text-align:left;border-bottom:2px solid #E8D5C4}
+td{padding:7px 10px;border-bottom:1px solid #E8D5C420}
+tr:hover{background:#FFF8F0}
+.total-row{font-weight:700;border-top:2px solid #E8D5C4;background:#FFF8F0}
+.balance-box{background:#FFF8F0;border:2px solid #E8D5C4;border-radius:14px;padding:20px;text-align:center;margin-top:24px}
+.balance-box .val{font-family:'Playfair Display',serif;font-size:28px;font-weight:900}
+.footer{margin-top:32px;padding-top:16px;border-top:1px solid #E8D5C4;font-size:10px;color:#6B4E3D;text-align:center}
+@media print{body{padding:20px}@page{margin:15mm}}
+</style></head><body>
+<div class="header">
+  <h1>⛷️ Livigno 2026</h1>
+  <div class="sub">Persönliche Abrechnung für ${d.person}</div>
+</div>
+
+<div class="summary-grid">
+  <div class="sum-box"><div class="label">Mein Anteil</div><div class="val">${f(d.totalOwe)}</div></div>
+  <div class="sum-box"><div class="label">Selbst bezahlt</div><div class="val" style="color:#7BA05B">${f(d.totalPaid)}</div></div>
+  <div class="sum-box"><div class="label">Überwiesen</div><div class="val" style="color:#D4A017">${f(d.totalTransferredOut)}</div></div>
+</div>
+
+<div class="section">
+  <h3>Meine Ausgabenanteile</h3>
+  <table><thead><tr><th>Datum</th><th>Was</th><th>Bezahlt von</th><th style="text-align:right">Gesamt</th><th style="text-align:center">Aufgeteilt auf</th><th style="text-align:right">Mein Anteil</th></tr></thead>
+  <tbody>${expRows}
+  <tr class="total-row"><td colspan="5">Summe meiner Anteile</td><td style="text-align:right">${f(d.totalOwe)}</td></tr>
+  </tbody></table>
+</div>
+
+${d.iPaid.length?`<div class="section">
+  <h3>Von mir bezahlt (für die Gruppe)</h3>
+  <table><thead><tr><th>Datum</th><th>Was</th><th style="text-align:right">Betrag</th></tr></thead>
+  <tbody>${paidRows}
+  <tr class="total-row"><td colspan="2">Summe bezahlt</td><td style="text-align:right">${f(d.totalPaid)}</td></tr>
+  </tbody></table>
+</div>`:""}
+
+${txOutRows||txInRows?`<div class="section">
+  <h3>Überweisungen</h3>
+  <table><thead><tr><th>Datum</th><th>Richtung</th><th>Notiz</th><th style="text-align:right">Betrag</th></tr></thead>
+  <tbody>${txOutRows}${txInRows}
+  <tr class="total-row"><td colspan="3">Netto überwiesen</td><td style="text-align:right">${f(d.totalTransferredOut-d.totalTransferredIn)}</td></tr>
+  </tbody></table>
+</div>`:""}
+
+${remainingHtml}
+
+<div class="balance-box">
+  <div class="label" style="font-size:11px;font-weight:700;color:#6B4E3D;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Aktueller Saldo</div>
+  <div class="val" style="color:${balColor}">${pos?"+":""}${f(d.netBalance)}</div>
+  <div style="font-size:12px;color:#6B4E3D;margin-top:6px">${Math.abs(d.netBalance)<1?"Alles ausgeglichen ✓":pos?d.person+" hat Geld zugute":d.person+" schuldet noch"}</div>
+</div>
+
+<div class="section" style="margin-top:24px">
+  <h3>Rechenweg</h3>
+  <table style="font-size:11px"><tbody>
+    <tr><td>Gesamtausgaben Gruppe</td><td style="text-align:right">${f(d.totalGroupExpenses)}</td></tr>
+    <tr><td>Mein Anteil (gewichtet nach Aufteilung)</td><td style="text-align:right">− ${f(d.totalOwe)}</td></tr>
+    <tr><td>Selbst bezahlt für die Gruppe</td><td style="text-align:right">+ ${f(d.totalPaid)}</td></tr>
+    <tr><td>Überweisungen gesendet</td><td style="text-align:right">+ ${f(d.totalTransferredOut)}</td></tr>
+    <tr><td>Überweisungen empfangen</td><td style="text-align:right">− ${f(d.totalTransferredIn)}</td></tr>
+    <tr class="total-row"><td>= Saldo</td><td style="text-align:right;color:${balColor}">${pos?"+":""}${f(d.netBalance)}</td></tr>
+  </tbody></table>
+</div>
+
+<div class="footer">
+  Erstellt am ${new Date().toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"})} · cash.kailohmann.de · Livigno Gruppenkasse 2026
+</div>
+</body></html>`;
+}
 
 // Init
 load();
