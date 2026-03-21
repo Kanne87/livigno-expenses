@@ -248,3 +248,48 @@ app.get("/api/webhook/add", (req, res) => {
 app.get("/api/crew", (req, res) => res.json({ fullCrew: FULL_CREW, activeCrew: ACTIVE_CREW }));
 
 app.listen(PORT, () => console.log(`🏂 Livigno Expenses v2 running on :${PORT}`));
+
+// --- PDF Generation per Rider ---
+app.get("/api/export/:person", (req, res) => {
+  const person = decodeURIComponent(req.params.person);
+  if (!FULL_CREW.includes(person)) return res.status(404).json({ error: "Person not found" });
+  
+  const settlement = calculateSettlement();
+  const expenses = settlement.expenses;
+  const transfers = settlement.transfers;
+  
+  // Expenses this person is involved in
+  const myExpenses = expenses.filter(e => {
+    const group = resolveForWho(e.for_who);
+    return group.includes(person);
+  }).map(e => {
+    const group = resolveForWho(e.for_who);
+    const myShare = e.amount / group.length;
+    return { ...e, myShare, group, splitCount: group.length };
+  });
+  
+  // Expenses this person paid
+  const iPaid = expenses.filter(e => e.person === person);
+  const totalPaid = iPaid.reduce((s, e) => s + e.amount, 0);
+  const totalOwe = myExpenses.reduce((s, e) => s + e.myShare, 0);
+  
+  // Transfers
+  const myTransfersOut = transfers.filter(t => t.from_person === person);
+  const myTransfersIn = transfers.filter(t => t.to_person === person);
+  const totalTransferredOut = myTransfersOut.reduce((s, t) => s + t.amount, 0);
+  const totalTransferredIn = myTransfersIn.reduce((s, t) => s + t.amount, 0);
+  
+  const netBalance = totalPaid - totalOwe + totalTransferredOut - totalTransferredIn;
+  const remaining = settlement.remainingTransfers.filter(t => t.from === person || t.to === person);
+  
+  res.json({
+    person, 
+    myExpenses, iPaid, 
+    totalPaid, totalOwe,
+    myTransfersOut, myTransfersIn,
+    totalTransferredOut, totalTransferredIn,
+    netBalance, remaining,
+    totalGroupExpenses: settlement.totalExpenses,
+    crew: FULL_CREW
+  });
+});
