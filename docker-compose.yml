@@ -1,20 +1,26 @@
 services:
   app:
     build: .
-    ports:
-      - "3000"
     volumes:
-      - expenses-data:/app/data
+      - /opt/livigno-data:/app/data
     environment:
       - PORT=3000
       - DB_PATH=/app/data/expenses.db
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     networks:
       - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.livigno.rule=Host(`cash.kailohmann.de`)"
+      - "traefik.http.routers.livigno.entrypoints=https"
+      - "traefik.http.routers.livigno.tls=true"
+      - "traefik.http.routers.livigno.tls.certresolver=letsencrypt"
+      - "traefik.http.services.livigno.loadbalancer.server.port=3000"
+      - "traefik.http.routers.livigno-http.rule=Host(`cash.kailohmann.de`)"
+      - "traefik.http.routers.livigno-http.entrypoints=http"
+      - "traefik.http.routers.livigno-http.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
     restart: unless-stopped
-
-volumes:
-  expenses-data:
 
 networks:
   coolify:
