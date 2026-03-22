@@ -131,6 +131,7 @@ function expenseCard(e){
     ${e.merchant?`<div class="meta" style="margin-top:6px;padding-top:6px;border-top:1px solid ${P.border}60">🏪 ${e.merchant}${e.details?" — "+e.details:""}</div>`:""}
   </div><div style="text-align:right;min-width:85px;flex-shrink:0">
     <div class="amt">${fmt(e.amount)}</div><div class="per">${fmt(pp)} / Pers.</div>
+    <button class="btn-del" style="color:var(--primary);border-color:rgba(200,149,108,0.3)" onclick="event.stopPropagation();editExpense(${e.id})">Bearbeiten</button>
     <button class="btn-del" onclick="event.stopPropagation();delExpense(${e.id})">Löschen</button>
   </div></div></div>`;
 }
@@ -175,12 +176,12 @@ function balanceView(){
 
 function logView(){
   if(!state.log.length)return`<div class="section-title">📋 Protokoll (0)</div><div class="meta" style="text-align:center;padding:20px">Noch keine Einträge</div>`;
-  const icons={create:"➕",delete:"🗑️",init:"🚀"};
+  const icons={create:"➕",delete:"🗑️",init:"🚀",edit:"✏️"};
   let html=`<div class="section-title">📋 Protokoll (${state.log.length})</div>`;
   state.log.forEach(e=>{
     const d=new Date(e.created_at+"Z");const ts=d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"});
     html+=`<div class="log-entry"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
-      <span class="log-action">${icons[e.action]||"📝"} ${e.action==="create"?"Hinzugefügt":e.action==="delete"?"Gelöscht":"Initialisiert"}</span>
+      <span class="log-action">${icons[e.action]||"📝"} ${e.action==="create"?"Hinzugefügt":e.action==="delete"?"Gelöscht":e.action==="edit"?"Bearbeitet":"Initialisiert"}</span>
       <span class="log-time">${ts}</span></div>
       <div class="log-desc">${e.description||""}</div>
       ${e.actor?`<div class="log-actor">von ${e.actor}</div>`:""}</div>`;
@@ -318,12 +319,72 @@ document.getElementById("fab-add").onclick=()=>{
     const forWho=selectedFor.length===crew.length?"Alle":selectedFor.join(",");
     await fetch("/api/expenses",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
       person:selectedBy,what:m.querySelector("#inp-what").value.trim(),amount:parseFloat(m.querySelector("#inp-amount").value),
+      date:m.querySelector("#inp-date").value.trim()||null,
       for_who:forWho,category:selectedCat,merchant:m.querySelector("#inp-merchant")?.value||null,details:m.querySelector("#inp-details")?.value||null,
       receipt_data:receiptB64||null
     })});
     m.remove();load();
   };
 };
+
+// Edit expense
+async function editExpense(id){
+  const e=state.expenses.find(x=>x.id===id);if(!e)return;
+  const crew=state.crew;
+  let selectedFor=e.for_who==="Alle"?[...crew]:e.for_who==="Reise"?[...state.summary.activeCrew]:e.for_who.includes(",")?e.for_who.split(",").map(s=>s.trim()):[e.for_who];
+  let selectedBy=e.person;let selectedCat=e.category||"other";
+  const m=document.createElement("div");m.className="overlay";m.onclick=()=>m.remove();
+  m.innerHTML=`<div class="modal" onclick="event.stopPropagation()">
+    <h3>Ausgabe bearbeiten</h3>
+    <label class="form-label">Beschreibung</label><input class="form-input" id="edit-what" value="${e.what}">
+    <div class="form-row"><div><label class="form-label">Betrag (€)</label><input class="form-input" id="edit-amount" type="number" step="0.01" value="${e.amount}"></div>
+    <div><label class="form-label">Datum</label><input class="form-input" id="edit-date" value="${e.date}" placeholder="TT.MM."></div></div>
+    <div><label class="form-label">Händler</label><input class="form-input" id="edit-merchant" value="${e.merchant||""}"></div>
+    <div><label class="form-label">Details</label><textarea class="form-input" id="edit-details" rows="2" style="resize:vertical;font-family:inherit">${e.details||""}</textarea></div>
+    <label class="form-label">Bezahlt von</label><div class="pill-group" id="edit-paid-by"></div>
+    <label class="form-label">Kategorie</label><div class="pill-group" id="edit-cat-pills"></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><label class="form-label" style="margin:0">Aufgeteilt auf</label>
+    <div><span style="font-size:11px;color:var(--primary);cursor:pointer;font-weight:600;margin-right:8px" id="edit-sel-all">Alle</span><span style="font-size:11px;color:var(--text2);cursor:pointer;font-weight:600" id="edit-sel-none">Keine</span></div></div>
+    <div class="pill-group" id="edit-split-pills"></div>
+    <div id="edit-split-info" class="hidden"></div>
+    <div style="display:flex;gap:10px;margin-top:8px"><button class="btn btn-secondary" style="flex:1" onclick="this.closest('.overlay').remove()">Abbrechen</button>
+    <button class="btn btn-primary" style="flex:2" id="edit-btn-save">💾 Speichern</button></div></div>`;
+  document.body.appendChild(m);
+
+  // Paid-by pills
+  const paidByDiv=m.querySelector("#edit-paid-by");
+  crew.forEach(p=>{const pill=document.createElement("button");pill.className="pill"+(p===selectedBy?" active":"");pill.textContent=p;
+    pill.onclick=()=>{selectedBy=p;paidByDiv.querySelectorAll(".pill").forEach(x=>x.classList.remove("active"));pill.classList.add("active");};paidByDiv.appendChild(pill);});
+
+  // Category pills
+  const catDiv=m.querySelector("#edit-cat-pills");
+  Object.entries(CATS).forEach(([k,icon])=>{const pill=document.createElement("button");pill.className="pill"+(k===selectedCat?" active":"");pill.textContent=icon+" "+k;
+    pill.onclick=()=>{selectedCat=k;catDiv.querySelectorAll(".pill").forEach(x=>x.classList.remove("active"));pill.classList.add("active");};catDiv.appendChild(pill);});
+
+  // Split pills
+  function renderEditSplit(){
+    const div=m.querySelector("#edit-split-pills");div.innerHTML="";
+    crew.forEach(p=>{const pill=document.createElement("button");pill.className="pill"+(selectedFor.includes(p)?" active":"");pill.textContent=p;
+      pill.onclick=()=>{if(selectedFor.includes(p))selectedFor=selectedFor.filter(x=>x!==p);else selectedFor.push(p);renderEditSplit();};div.appendChild(pill);});
+    const info=m.querySelector("#edit-split-info");
+    if(selectedFor.length>0&&selectedFor.length<crew.length){info.className="split-info";info.textContent=`÷${selectedFor.length} — Nur ${selectedFor.join(" & ")}`;}
+    else{info.className="split-info hidden";}
+  }
+  renderEditSplit();
+  m.querySelector("#edit-sel-all").onclick=()=>{selectedFor=[...crew];renderEditSplit();};
+  m.querySelector("#edit-sel-none").onclick=()=>{selectedFor=[];renderEditSplit();};
+
+  // Save
+  m.querySelector("#edit-btn-save").onclick=async()=>{
+    const forWho=selectedFor.length===crew.length?"Alle":selectedFor.join(",");
+    await fetch(`/api/expenses/${id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+      person:selectedBy,what:m.querySelector("#edit-what").value.trim(),amount:parseFloat(m.querySelector("#edit-amount").value),
+      date:m.querySelector("#edit-date").value.trim(),
+      for_who:forWho,category:selectedCat,merchant:m.querySelector("#edit-merchant").value||null,details:m.querySelector("#edit-details").value||null
+    })});
+    m.remove();load();
+  };
+}
 
 // --- PDF Export ---
 async function exportPDF(person){
