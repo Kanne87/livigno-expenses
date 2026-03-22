@@ -142,25 +142,71 @@ function calculateSettlement() {
   return { expenses, transfers, totalExpenses, owes, paid, rawBalances, netBalances, remainingTransfers, fullCrew: FULL_CREW, activeCrew: ACTIVE_CREW };
 }
 
+// --- Sort helper: parse "DD.MM." to sortable int (MM*100+DD) ---
+const CAT_ORDER = {transport:0,accommodation:1,lift:2,equipment:3,activity:4,food:5,drinks:6,other:7};
+function dateSortKey(d) {
+  const m = (d||"").match(/(\d{1,2})\.(\d{1,2})/);
+  return m ? parseInt(m[2])*100+parseInt(m[1]) : 9999;
+}
+function sortExpenses(rows) {
+  return rows.sort((a,b) => dateSortKey(a.date)-dateSortKey(b.date) || (CAT_ORDER[a.category]||7)-(CAT_ORDER[b.category]||7));
+}
+
 // --- API Routes ---
 app.get("/api/expenses", (req, res) => {
-  const expenses = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at,updated_at FROM expenses ORDER BY id ASC").all();
-  res.json(expenses);
+  const expenses = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at,updated_at FROM expenses").all();
+  res.json(sortExpenses(expenses));
 });
 
 app.post("/api/expenses", (req, res) => {
-  const { person, what, amount, for_who, category, merchant, details, receipt_data } = req.body;
+  const { person, what, amount, for_who, category, merchant, details, receipt_data, date: clientDate } = req.body;
   if (!person || !what || !amount) return res.status(400).json({ error: "person, what, amount required" });
-  const date = new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
+  const date = clientDate || new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
   const result = db.prepare(
     "INSERT INTO expenses (date, person, what, amount, for_who, category, merchant, details, receipt_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
   ).run(date, person, what, parseFloat(amount), for_who || "Reise", category || "other", merchant || null, details || null, receipt_data || null);
   const expense = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at FROM expenses WHERE id = ?").get(result.lastInsertRowid);
   
   db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)")
-    .run("create", "expense", expense.id, `${what} – ${parseFloat(amount).toFixed(2)}€${receipt_data ? " (mit Beleg)" : ""}`, person);
+    .run("create", "expense", expense.id, `${what} – ${parseFloat(amount).toFixed(2)}€ am ${date}${receipt_data ? " (mit Beleg)" : ""}`, person);
   
   res.status(201).json(expense);
+});
+
+app.put("/api/expenses/:id", (req, res) => {
+  const old = db.prepare("SELECT * FROM expenses WHERE id = ?").get(req.params.id);
+  if (!old) return res.status(404).json({ error: "Not found" });
+  
+  const { person, what, amount, for_who, category, merchant, details, date: clientDate } = req.body;
+  const changes = [];
+  if (what !== undefined && what !== old.what) changes.push(`Titel: "${old.what}" → "${what}"`);
+  if (amount !== undefined && parseFloat(amount) !== old.amount) changes.push(`Betrag: ${old.amount.toFixed(2)}€ → ${parseFloat(amount).toFixed(2)}€`);
+  if (person !== undefined && person !== old.person) changes.push(`Bezahlt von: ${old.person} → ${person}`);
+  if (clientDate !== undefined && clientDate !== old.date) changes.push(`Datum: ${old.date} → ${clientDate}`);
+  if (for_who !== undefined && for_who !== old.for_who) changes.push(`Aufteilung: ${old.for_who} → ${for_who}`);
+  if (category !== undefined && category !== old.category) changes.push(`Kategorie: ${old.category} → ${category}`);
+  if (merchant !== undefined && merchant !== old.merchant) changes.push(`Händler: ${old.merchant||"–"} → ${merchant||"–"}`);
+  if (details !== undefined && details !== old.details) changes.push(`Details: geändert`);
+  
+  if (changes.length === 0) return res.json(old);
+  
+  db.prepare(`UPDATE expenses SET 
+    date=?, person=?, what=?, amount=?, for_who=?, category=?, merchant=?, details=?,
+    updated_at=datetime('now') WHERE id=?`
+  ).run(
+    clientDate || old.date, person || old.person, what || old.what, 
+    amount !== undefined ? parseFloat(amount) : old.amount,
+    for_who || old.for_who, category || old.category, 
+    merchant !== undefined ? merchant : old.merchant,
+    details !== undefined ? details : old.details,
+    req.params.id
+  );
+  
+  db.prepare("INSERT INTO audit_log (action, entity_type, entity_id, description, actor) VALUES (?, ?, ?, ?, ?)")
+    .run("edit", "expense", parseInt(req.params.id), `${old.what}: ${changes.join(", ")}`, person || old.person);
+  
+  const updated = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at,updated_at FROM expenses WHERE id = ?").get(req.params.id);
+  res.json(updated);
 });
 
 app.delete("/api/expenses/:id", (req, res) => {
