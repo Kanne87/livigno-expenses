@@ -330,16 +330,30 @@ async function exportPDF(person){
   const resp=await fetch(`/api/export/${encodeURIComponent(person)}`);
   if(!resp.ok){alert("Export fehlgeschlagen");return;}
   const d=await resp.json();
-  const w=window.open("","_blank");
-  w.document.write(buildPDFHtml(d));
-  w.document.close();
-  setTimeout(()=>w.print(),500);
+  const html=buildPDFHtml(d);
+  // Create full-screen overlay with iframe
+  const overlay=document.createElement("div");
+  overlay.style.cssText="position:fixed;inset:0;z-index:2000;background:var(--bg);display:flex;flex-direction:column";
+  overlay.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface)">
+    <button onclick="this.closest('div[style*=fixed]').remove()" class="btn btn-secondary" style="font-size:12px;padding:8px 14px">← Zurück</button>
+    <span style="font-family:'Playfair Display',serif;font-weight:700;font-size:14px">Abrechnung ${person}</span>
+    <button onclick="document.getElementById('pdf-frame').contentWindow.print()" class="btn btn-primary" style="font-size:12px;padding:8px 14px">🖨️ Drucken</button>
+  </div><iframe id="pdf-frame" style="flex:1;border:none;width:100%"></iframe>`;
+  document.body.appendChild(overlay);
+  const iframe=overlay.querySelector("iframe");
+  iframe.contentDocument.open();
+  iframe.contentDocument.write(html);
+  iframe.contentDocument.close();
 }
 
 async function exportAllPDFs(){
+  alert("PDFs werden nacheinander geöffnet. Bitte jedes einzeln drucken/speichern.");
   for(const p of state.crew){
     await exportPDF(p);
-    await new Promise(r=>setTimeout(r,800));
+    // Wait for user to close each one
+    await new Promise(r=>{
+      const check=setInterval(()=>{if(!document.getElementById("pdf-frame")){clearInterval(check);r();}},500);
+    });
   }
 }
 
