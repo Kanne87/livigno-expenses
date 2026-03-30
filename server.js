@@ -152,6 +152,26 @@ function sortExpenses(rows) {
   return rows.sort((a,b) => dateSortKey(a.date)-dateSortKey(b.date) || (CAT_ORDER[a.category]||7)-(CAT_ORDER[b.category]||7));
 }
 
+// --- Auth Middleware ---
+const USERINFO_URL = process.env.AUTH_USERINFO_URL || "https://auth.kailohmann.de/application/o/userinfo/";
+async function requireAuth(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  try {
+    const resp = await fetch(USERINFO_URL, { headers: { Authorization: auth } });
+    if (!resp.ok) return res.status(401).json({ error: "Invalid token" });
+    const user = await resp.json();
+    if (!user.sub) return res.status(401).json({ error: "Invalid token" });
+    req.user = user;
+    next();
+  } catch {
+    return res.status(401).json({ error: "Auth validation failed" });
+  }
+}
+app.use("/api", requireAuth);
+
 // --- API Routes ---
 app.get("/api/expenses", (req, res) => {
   const expenses = db.prepare("SELECT id,date,person,what,amount,for_who,category,merchant,details,created_at,updated_at FROM expenses").all();

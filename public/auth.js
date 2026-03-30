@@ -1,6 +1,6 @@
 const AUTH_CONFIG = {
   authority: 'https://auth.kailohmann.de/application/o/livigno-expenses-spa/',
-  clientId: 'PLACEHOLDER_CLIENT_ID',
+  clientId: 'sTY3Kd81JE0QnOCVdUmPof4ydUsFUryNRftrYuOi',
   redirectUri: window.location.origin + '/popup-callback.html',
   scope: 'openid email profile',
   tokenKey: 'livigno_token'
