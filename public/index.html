@@ -77,6 +77,12 @@ h1{font-family:'Playfair Display',Georgia,serif;font-weight:900;font-size:26px;l
 </style>
 </head>
 <body>
+<script src="/auth.js"></script>
+<div id="loginScreen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:9999;align-items:center;justify-content:center;flex-direction:column;gap:20px">
+  <h1 style="font-family:'Playfair Display',Georgia,serif;font-size:26px;color:var(--primary)">⛷️ Livigno 2026</h1>
+  <p style="color:var(--text2);font-size:14px">Gruppenkasse – Bitte anmelden</p>
+  <button onclick="login()" style="padding:12px 28px;background:var(--primary);color:white;border:none;border-radius:10px;cursor:pointer;font-size:1rem;font-family:inherit">Anmelden</button>
+</div>
 <div class="wrap" id="app">
   <div class="header">
     <div style="display:inline-flex;align-items:center;gap:10px;margin-bottom:6px">
@@ -647,7 +653,7 @@ ${remainingHtml}
 }
 
 // Init
-load();
+if (isTokenValid()) { load(); } else { showLoginScreen(); }
 </script>
 </body>
 </html>
