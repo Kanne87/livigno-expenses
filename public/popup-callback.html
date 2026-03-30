@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html><head><title>Login...</title></head>
+<body>
+<p>Anmeldung wird abgeschlossen...</p>
+<script>
+(async function() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code');
+  if (!code) { document.body.textContent = 'Fehler: Kein Code erhalten'; return; }
+  const verifier = sessionStorage.getItem('pkce_verifier');
+  if (!verifier) { document.body.textContent = 'Fehler: Kein Verifier'; return; }
+  try {
+    const r = await fetch('https://auth.kailohmann.de/application/o/token/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: 'sTY3Kd81JE0QnOCVdUmPof4ydUsFUryNRftrYuOi',
+        code: code,
+        redirect_uri: location.origin + '/popup-callback.html',
+        code_verifier: verifier
+      })
+    });
+    const data = await r.json();
+    if (data.access_token) {
+      sessionStorage.removeItem('pkce_verifier');
+      if (window.opener) {
+        window.opener.postMessage({ type: 'auth-success', token: data.access_token }, location.origin);
+        window.close();
+      } else {
+        localStorage.setItem('livigno_token', data.access_token);
+        window.location.href = '/';
+      }
+    } else { document.body.textContent = 'Login fehlgeschlagen'; }
+  } catch(e) { document.body.textContent = 'Fehler: ' + e.message; }
+})();
+</script>
+</body>
+</html>
