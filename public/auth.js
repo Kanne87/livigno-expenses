@@ -1,5 +1,6 @@
 const AUTH_CONFIG = {
   authority: 'https://auth.kailohmann.de/application/o/livigno-expenses-spa/',
+  authorizeUrl: 'https://auth.kailohmann.de/application/o/authorize/',
   clientId: 'sTY3Kd81JE0QnOCVdUmPof4ydUsFUryNRftrYuOi',
   redirectUri: window.location.origin + '/popup-callback.html',
   scope: 'openid email profile',
@@ -49,7 +50,7 @@ async function login() {
     state: crypto.randomUUID(),
     prompt: 'login'
   });
-  const url = AUTH_CONFIG.authority + 'authorize/?' + params;
+  const url = AUTH_CONFIG.authorizeUrl + '?' + params;
   const popup = window.open(url, 'auth-popup', 'width=500,height=700,popup=true');
   if (!popup) window.location.href = url;
 }
